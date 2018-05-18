@@ -53,6 +53,7 @@ public class Addresses extends Test {
     protected static final String ADDR_CITY          = "addr:city";
     protected static final String ADDR_UNIT          = "addr:unit";
     protected static final String ADDR_FLATS         = "addr:flats";
+    protected static final String ADDR_HOUSE_NAME    = "addr:housename";
     protected static final String ADDR_POSTCODE      = "addr:postcode";
     protected static final String ASSOCIATED_STREET  = "associatedStreet";
     // CHECKSTYLE.ON: SingleSpaceSeparator
@@ -113,18 +114,32 @@ public class Addresses extends Test {
     public void visit(Collection<OsmPrimitive> selection) {
         // check for duplicates that use addr:street/addr:place
         Map<String, OsmPrimitive> addresses = new HashMap<>();
+        Set<String> ignored_addresses = new HashSet<>();
+        String simplified_address;
         for (OsmPrimitive p : selection) {
+            if (p.hasKey(ADDR_UNIT) && p instanceof Node) {
+                for (OsmPrimitive r : p.getReferrers()) {
+                    if (r.hasKey(ADDR_HOUSE_NUMBER)) {
+                        // ignore addresses of buildings that are connected to addr:unit nodes
+                        // it's quite reasonable that there are more buildings with this address
+                        // NOTE: this should work before any warnings are created, as the documentation
+                        // says primitives are always visited in the same order: nodes first, then ways
+                        simplified_address = getSimplifiedAddress(r);
+                        if (!ignored_addresses.contains(simplified_address)) {
+                            ignored_addresses.add(simplified_address);
+                        }
+                    }
+                }
+            }
             // ignore POIs
             if (p.hasKey("shop", "amenity", "tourism", "leisure", "emergency", "craft", "entrance", "name")) {
                 continue;
             }
             if (p.hasKey(ADDR_HOUSE_NUMBER) && p.hasKey(ADDR_STREET, ADDR_PLACE)) {
-                // ignore whitespaces and dashes in street name, so that "Mozart-Gasse", "Mozart Gasse" and "Mozartgasse" are all seen as equal
-                String simplified_street_name = p.get(ADDR_STREET).toUpperCase().replaceAll("[ -]", "");
-                String simplified_address = Stream.of(simplified_street_name, p.get(ADDR_PLACE), p.get(ADDR_HOUSE_NUMBER), p.get(ADDR_UNIT), p.get(ADDR_FLATS))
-                    .map(s -> (s == null ? "" : s))
-                    .collect(Collectors.joining(" "));
-                simplified_address = simplified_address.trim().toUpperCase();
+                simplified_address = getSimplifiedAddress(p);
+                if (ignored_addresses.contains(simplified_address)) {
+                    continue;
+                }
                 if (addresses.containsKey(simplified_address)) {
                     OsmPrimitive p2 = addresses.get(simplified_address);
                     Severity severity_level;
@@ -133,6 +148,7 @@ public class Addresses extends Test {
                     primitives.add(p2);
                     String city1 = p.get(ADDR_CITY);
                     String city2 = p2.get(ADDR_CITY);
+                    double distance = getDistance(p, p2);
                     if (city1 != null && city2 != null) {
                         if (city1.equals(city2)) {
                             // address INCLUDING city identical
@@ -145,7 +161,7 @@ public class Addresses extends Test {
                         }
                         else {
                             // address differs only by city - notify if very close, otherwise ignore
-                            if (inReach(p, p2, 200.0)) {
+                            if (distance < 200.0) {
                                 severity_level = Severity.OTHER;
                             }
                             else {
@@ -155,16 +171,22 @@ public class Addresses extends Test {
 
                     }
                     else {
-                        // at least one address has no city specified - warn if very close, otherwise only notify
-                        // TODO: get city from surrounding boundaries?
-                        if (inReach(p, p2, 200.0)) {
+                        // at least one address has no city specified
+                        if (p.hasKey(ADDR_POSTCODE) && p2.hasKey(ADDR_POSTCODE) && p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
+                            // address including postcode identical
                             severity_level = Severity.WARNING;
                         }
                         else {
-                            severity_level = Severity.OTHER;
+                            // city/postcode unclear - warn if very close, otherwise only notify
+                            // TODO: get city from surrounding boundaries?
+                            if (distance < 200.0) {
+                                severity_level = Severity.WARNING;
+                            }
+                            else {
+                                severity_level = Severity.OTHER;
+                            }
                         }
                     }
-                    double distance = getDistance(p, p2);
                     errors.add(TestError.builder(this, severity_level, DUPLICATE_HOUSE_NUMBER)
                             .message(tr("Duplicate house numbers"), marktr("''{0}'' ({1}m)"), simplified_address, (int) distance).primitives(primitives).build());
                 } else {
@@ -174,6 +196,17 @@ public class Addresses extends Test {
         }
         // call the old functions for nodes/ways/relations that check for duplicates that use associatedStreet relations
         super.visit(selection);
+    }
+
+    private String getSimplifiedAddress(OsmPrimitive p) {
+        String simplified_street_name = p.hasKey(ADDR_STREET) ? p.get(ADDR_STREET) : p.get(ADDR_PLACE);
+        // ignore whitespaces and dashes in street name, so that "Mozart-Gasse", "Mozart Gasse" and "Mozartgasse" are all seen as equal
+        simplified_street_name = simplified_street_name.toUpperCase().replaceAll("[ -]", "");
+        String simplified_address = Stream.of(simplified_street_name, p.get(ADDR_HOUSE_NUMBER), p.get(ADDR_HOUSE_NAME), p.get(ADDR_UNIT), p.get(ADDR_FLATS))
+            .map(s -> (s == null ? "" : s))
+            .collect(Collectors.joining(" "));
+        simplified_address = simplified_address.trim().toUpperCase();
+        return simplified_address;
     }
 
     @Override
@@ -263,12 +296,6 @@ public class Addresses extends Test {
         LatLon center_a = point_a.getBBox().getCenter();
         LatLon center_b = point_b.getBBox().getCenter();
         return (center_a.greatCircleDistance(center_b));
-    }
-
-    protected boolean inReach(OsmPrimitive point_a, OsmPrimitive point_b, double max_distance) {
-        LatLon center_a = point_a.getBBox().getCenter();
-        LatLon center_b = point_b.getBBox().getCenter();
-        return (center_a.greatCircleDistance(center_b) < max_distance);
     }
 
     protected void checkDistance(OsmPrimitive house, Collection<Way> street) {
