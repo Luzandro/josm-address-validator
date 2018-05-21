@@ -58,6 +58,9 @@ public class Addresses extends Test {
     protected static final String ASSOCIATED_STREET  = "associatedStreet";
     // CHECKSTYLE.ON: SingleSpaceSeparator
 
+    private Map<String, OsmPrimitive> addresses = null;
+    private Set<String> ignored_addresses = null;
+
     /**
      * Constructor
      */
@@ -110,92 +113,113 @@ public class Addresses extends Test {
         }
     }
 
-    @Override
-    public void visit(Collection<OsmPrimitive> selection) {
-        // check for duplicates that use addr:street/addr:place
-        Map<String, OsmPrimitive> addresses = new HashMap<>();
-        Set<String> ignored_addresses = new HashSet<>();
+    private boolean isPOI(OsmPrimitive p) {
+        return p.hasKey("shop", "amenity", "tourism", "leisure", "emergency", "craft", "entrance", "name");
+    }
+
+    private boolean hasAddress(OsmPrimitive p) {
+        return (p.hasKey(ADDR_HOUSE_NUMBER) && p.hasKey(ADDR_STREET, ADDR_PLACE));
+    }
+
+    private void addAddress(OsmPrimitive p) {
+        if (isPOI(p)) {
+            return;
+        }
+        String simplified_address = getSimplifiedAddress(p);
+        if (!ignored_addresses.contains(simplified_address)) {
+            addresses.put(simplified_address, p);
+        }
+    }
+
+    protected void initAddressMap(OsmPrimitive primitive) {
+        addresses = new HashMap<>();
+        ignored_addresses = new HashSet<>();
+        Collection<OsmPrimitive> primitives = primitive.getDataSet().allPrimitives();
         String simplified_address;
-        for (OsmPrimitive p : selection) {
+        for (OsmPrimitive p : primitives) {
             if (p.hasKey(ADDR_UNIT) && p instanceof Node) {
                 for (OsmPrimitive r : p.getReferrers()) {
                     if (r.hasKey(ADDR_HOUSE_NUMBER)) {
                         // ignore addresses of buildings that are connected to addr:unit nodes
                         // it's quite reasonable that there are more buildings with this address
-                        // NOTE: this should work before any warnings are created, as the documentation
-                        // says primitives are always visited in the same order: nodes first, then ways
                         simplified_address = getSimplifiedAddress(r);
                         if (!ignored_addresses.contains(simplified_address)) {
                             ignored_addresses.add(simplified_address);
                         }
-                    }
-                }
-            }
-            // ignore POIs
-            if (p.hasKey("shop", "amenity", "tourism", "leisure", "emergency", "craft", "entrance", "name")) {
-                continue;
-            }
-            if (p.hasKey(ADDR_HOUSE_NUMBER) && p.hasKey(ADDR_STREET, ADDR_PLACE)) {
-                simplified_address = getSimplifiedAddress(p);
-                if (ignored_addresses.contains(simplified_address)) {
-                    continue;
-                }
-                if (addresses.containsKey(simplified_address)) {
-                    OsmPrimitive p2 = addresses.get(simplified_address);
-                    Severity severity_level;
-                    List<OsmPrimitive> primitives = new ArrayList<>(2);
-                    primitives.add(p);
-                    primitives.add(p2);
-                    String city1 = p.get(ADDR_CITY);
-                    String city2 = p2.get(ADDR_CITY);
-                    double distance = getDistance(p, p2);
-                    if (city1 != null && city2 != null) {
-                        if (city1.equals(city2)) {
-                            // address INCLUDING city identical
-                            if(!p.hasKey(ADDR_POSTCODE) || !p2.hasKey(ADDR_POSTCODE) || p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
-                                severity_level = Severity.WARNING;
-                            }
-                            else {
-                                severity_level = Severity.OTHER;
-                            }
-                        }
                         else {
-                            // address differs only by city - notify if very close, otherwise ignore
-                            if (distance < 200.0) {
-                                severity_level = Severity.OTHER;
-                            }
-                            else {
-                                continue;
+                            if (addresses.containsKey(simplified_address)) {
+                                addresses.remove(simplified_address);
                             }
                         }
-
                     }
-                    else {
-                        // at least one address has no city specified
-                        if (p.hasKey(ADDR_POSTCODE) && p2.hasKey(ADDR_POSTCODE) && p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
-                            // address including postcode identical
+                }
+            }
+            if (hasAddress(p)) {
+                addAddress(p);
+            }
+        }
+    }
+
+    protected void checkForDuplicate(OsmPrimitive p) {
+        if (this.addresses == null) {
+            initAddressMap(p);
+        }
+        if (!isPOI(p) && hasAddress(p)) {
+            String simplified_address = getSimplifiedAddress(p);
+            if (ignored_addresses.contains(simplified_address)) {
+                return;
+            }
+            if (addresses.containsKey(simplified_address)) {
+                OsmPrimitive p2 = addresses.get(simplified_address);
+                if (p.equals(p2)) {
+                    return;
+                }
+                Severity severity_level = Severity.WARNING;
+                List<OsmPrimitive> primitives = new ArrayList<>(2);
+                primitives.add(p);
+                primitives.add(p2);
+                String city1 = p.get(ADDR_CITY);
+                String city2 = p2.get(ADDR_CITY);
+                double distance = getDistance(p, p2);
+                if (city1 != null && city2 != null) {
+                    if (city1.equals(city2)) {
+                        // address INCLUDING city identical
+                        if(!p.hasKey(ADDR_POSTCODE) || !p2.hasKey(ADDR_POSTCODE) || p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
                             severity_level = Severity.WARNING;
                         }
                         else {
-                            // city/postcode unclear - warn if very close, otherwise only notify
-                            // TODO: get city from surrounding boundaries?
-                            if (distance < 200.0) {
-                                severity_level = Severity.WARNING;
-                            }
-                            else {
-                                severity_level = Severity.OTHER;
-                            }
+                            severity_level = Severity.OTHER;
                         }
                     }
-                    errors.add(TestError.builder(this, severity_level, DUPLICATE_HOUSE_NUMBER)
-                            .message(tr("Duplicate house numbers"), marktr("''{0}'' ({1}m)"), simplified_address, (int) distance).primitives(primitives).build());
-                } else {
-                    addresses.put(simplified_address, p);
+                    else {
+                        // address differs only by city - notify if very close, otherwise ignore
+                        if (distance < 200.0) {
+                            severity_level = Severity.OTHER;
+                        }
+                    }
+
                 }
+                else {
+                    // at least one address has no city specified
+                    if (p.hasKey(ADDR_POSTCODE) && p2.hasKey(ADDR_POSTCODE) && p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
+                        // address including postcode identical
+                        severity_level = Severity.WARNING;
+                    }
+                    else {
+                        // city/postcode unclear - warn if very close, otherwise only notify
+                        // TODO: get city from surrounding boundaries?
+                        if (distance < 200.0) {
+                            severity_level = Severity.WARNING;
+                        }
+                        else {
+                            severity_level = Severity.OTHER;
+                        }
+                    }
+                }
+                errors.add(TestError.builder(this, severity_level, DUPLICATE_HOUSE_NUMBER)
+                        .message(tr("Duplicate house numbers"), marktr("''{0}'' ({1}m)"), simplified_address, (int) distance).primitives(primitives).build());
             }
         }
-        // call the old functions for nodes/ways/relations that check for duplicates that use associatedStreet relations
-        super.visit(selection);
     }
 
     private String getSimplifiedAddress(OsmPrimitive p) {
@@ -212,16 +236,19 @@ public class Addresses extends Test {
     @Override
     public void visit(Node n) {
         checkHouseNumbersWithoutStreet(n);
+        checkForDuplicate(n);
     }
 
     @Override
     public void visit(Way w) {
         checkHouseNumbersWithoutStreet(w);
+        checkForDuplicate(w);
     }
 
     @Override
     public void visit(Relation r) {
         checkHouseNumbersWithoutStreet(r);
+        checkForDuplicate(r);
         if (r.hasTag("type", ASSOCIATED_STREET)) {
             // Used to count occurences of each house number in order to find duplicates
             Map<String, List<OsmPrimitive>> map = new HashMap<>();
