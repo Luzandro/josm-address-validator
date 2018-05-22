@@ -145,7 +145,7 @@ public class Addresses extends Test {
     protected void initAddressMap(OsmPrimitive primitive) {
         addresses = new HashMap<>();
         ignored_addresses = new HashSet<>();
-        Collection<OsmPrimitive> primitives = primitive.getDataSet().allPrimitives();
+        Collection<OsmPrimitive> primitives = primitive.getDataSet().getPrimitives(p -> !p.isDeleted());
         String simplified_address;
         for (OsmPrimitive p : primitives) {
             if (p.hasKey(ADDR_UNIT) && p instanceof Node) {
