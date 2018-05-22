@@ -58,7 +58,7 @@ public class Addresses extends Test {
     protected static final String ASSOCIATED_STREET  = "associatedStreet";
     // CHECKSTYLE.ON: SingleSpaceSeparator
 
-    private Map<String, OsmPrimitive> addresses = null;
+    private Map<String, Collection<OsmPrimitive>> addresses = null;
     private Set<String> ignored_addresses = null;
 
     /**
@@ -121,13 +121,24 @@ public class Addresses extends Test {
         return (p.hasKey(ADDR_HOUSE_NUMBER) && p.hasKey(ADDR_STREET, ADDR_PLACE));
     }
 
-    private void addAddress(OsmPrimitive p) {
+    /**
+     * adds the OsmPrimitive to the address map if it complies to the restrictions
+     * @param p OsmPrimitive that has an address
+     */
+    private void collectAddress(OsmPrimitive p) {
         if (isPOI(p)) {
             return;
         }
         String simplified_address = getSimplifiedAddress(p);
         if (!ignored_addresses.contains(simplified_address)) {
-            addresses.put(simplified_address, p);
+            if (addresses.containsKey(simplified_address)) {
+                addresses.get(simplified_address).add(p);
+            }
+            else {
+                ArrayList<OsmPrimitive> objects = new ArrayList<>();
+                objects.add(p);
+                addresses.put(simplified_address, objects);
+            }
         }
     }
 
@@ -139,25 +150,30 @@ public class Addresses extends Test {
         for (OsmPrimitive p : primitives) {
             if (p.hasKey(ADDR_UNIT) && p instanceof Node) {
                 for (OsmPrimitive r : p.getReferrers()) {
-                    if (r.hasKey(ADDR_HOUSE_NUMBER)) {
+                    if (hasAddress(r)) {
                         // ignore addresses of buildings that are connected to addr:unit nodes
                         // it's quite reasonable that there are more buildings with this address
                         simplified_address = getSimplifiedAddress(r);
                         if (!ignored_addresses.contains(simplified_address)) {
                             ignored_addresses.add(simplified_address);
                         }
-                        else {
-                            if (addresses.containsKey(simplified_address)) {
+                        else if (addresses.containsKey(simplified_address)) {
                                 addresses.remove(simplified_address);
-                            }
                         }
                     }
                 }
             }
             if (hasAddress(p)) {
-                addAddress(p);
+                collectAddress(p);
             }
         }
+    }
+
+    @Override
+    public void endTest() {
+        addresses = null;
+        ignored_addresses = null;
+        super.endTest();
     }
 
     protected void checkForDuplicate(OsmPrimitive p) {
@@ -170,54 +186,56 @@ public class Addresses extends Test {
                 return;
             }
             if (addresses.containsKey(simplified_address)) {
-                OsmPrimitive p2 = addresses.get(simplified_address);
-                if (p.equals(p2)) {
-                    return;
-                }
-                Severity severity_level = Severity.WARNING;
-                List<OsmPrimitive> primitives = new ArrayList<>(2);
-                primitives.add(p);
-                primitives.add(p2);
-                String city1 = p.get(ADDR_CITY);
-                String city2 = p2.get(ADDR_CITY);
-                double distance = getDistance(p, p2);
-                if (city1 != null && city2 != null) {
-                    if (city1.equals(city2)) {
-                        // address INCLUDING city identical
-                        if(!p.hasKey(ADDR_POSTCODE) || !p2.hasKey(ADDR_POSTCODE) || p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
-                            severity_level = Severity.WARNING;
+                for (OsmPrimitive p2 : addresses.get(simplified_address)) {
+                    if (p == p2) {
+                        continue;
+                    }
+                    Severity severity_level = Severity.WARNING;
+                    List<OsmPrimitive> primitives = new ArrayList<>(2);
+                    primitives.add(p);
+                    primitives.add(p2);
+                    String city1 = p.get(ADDR_CITY);
+                    String city2 = p2.get(ADDR_CITY);
+                    double distance = getDistance(p, p2);
+                    if (city1 != null && city2 != null) {
+                        if (city1.equals(city2)) {
+                            if(!p.hasKey(ADDR_POSTCODE) || !p2.hasKey(ADDR_POSTCODE) || p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
+                                severity_level = Severity.WARNING;
+                            }
+                            else {
+                                // address including city identical but postcode differs
+                                // most likely perfectly fine
+                                severity_level = Severity.OTHER;
+                            }
                         }
                         else {
-                            severity_level = Severity.OTHER;
+                            // address differs only by city - notify if very close, otherwise ignore
+                            if (distance < 200.0) {
+                                severity_level = Severity.OTHER;
+                            }
                         }
-                    }
-                    else {
-                        // address differs only by city - notify if very close, otherwise ignore
-                        if (distance < 200.0) {
-                            severity_level = Severity.OTHER;
-                        }
-                    }
 
-                }
-                else {
-                    // at least one address has no city specified
-                    if (p.hasKey(ADDR_POSTCODE) && p2.hasKey(ADDR_POSTCODE) && p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
-                        // address including postcode identical
-                        severity_level = Severity.WARNING;
                     }
                     else {
-                        // city/postcode unclear - warn if very close, otherwise only notify
-                        // TODO: get city from surrounding boundaries?
-                        if (distance < 200.0) {
+                        // at least one address has no city specified
+                        if (p.hasKey(ADDR_POSTCODE) && p2.hasKey(ADDR_POSTCODE) && p.get(ADDR_POSTCODE).equals(p2.get(ADDR_POSTCODE))) {
+                            // address including postcode identical
                             severity_level = Severity.WARNING;
                         }
                         else {
-                            severity_level = Severity.OTHER;
+                            // city/postcode unclear - warn if very close, otherwise only notify
+                            // TODO: get city from surrounding boundaries?
+                            if (distance < 200.0) {
+                                severity_level = Severity.WARNING;
+                            }
+                            else {
+                                severity_level = Severity.OTHER;
+                            }
                         }
                     }
+                    errors.add(TestError.builder(this, severity_level, DUPLICATE_HOUSE_NUMBER)
+                            .message(tr("Duplicate house numbers"), marktr("''{0}'' ({1}m)"), simplified_address, (int) distance).primitives(primitives).build());
                 }
-                errors.add(TestError.builder(this, severity_level, DUPLICATE_HOUSE_NUMBER)
-                        .message(tr("Duplicate house numbers"), marktr("''{0}'' ({1}m)"), simplified_address, (int) distance).primitives(primitives).build());
             }
         }
     }
@@ -319,9 +337,15 @@ public class Addresses extends Test {
         }
     }
 
-    private double getDistance(OsmPrimitive point_a, OsmPrimitive point_b) {
-        LatLon center_a = point_a.getBBox().getCenter();
-        LatLon center_b = point_b.getBBox().getCenter();
+    /**
+     * returns rough distance between two OsmPrimitives
+     * @param a
+     * @param b
+     * @return distance of center of bounding boxes in meters
+     */
+    private double getDistance(OsmPrimitive a, OsmPrimitive b) {
+        LatLon center_a = a.getBBox().getCenter();
+        LatLon center_b = b.getBBox().getCenter();
         return (center_a.greatCircleDistance(center_b));
     }
 
